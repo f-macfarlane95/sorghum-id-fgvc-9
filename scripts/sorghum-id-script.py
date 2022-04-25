@@ -1,284 +1,349 @@
-import datetime, logging, os, sys, math, random
-logging.disable(logging.WARNING)
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+# ---------------------------------------------------------------------------- #
+#                           SORGHUM ID CLASSIFICATION                          #
+# ---------------------------------------------------------------------------- #
 
+# ---------------------------------- IMPORTS --------------------------------- #
+
+# TODO: Add if name is main and input args
+
+import matplotlib.pyplot as plt
+import seaborn as sns
+from PIL import Image as Img
+import cv2 as cv
+from sklearn.model_selection import StratifiedKFold
+from ImageDataAugmentor.image_data_augmentor import *
+from albumentations.core.composition import Compose, OneOf
+import albumentations as A
+from keras import Sequential, layers
+from keras.callbacks import EarlyStopping, ModelCheckpoint
+import tensorflow_addons as tfa
 import tensorflow as tf
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
-import cv2
-import albumentations as alb
+import datetime
+import logging
+import os
+import sys
+import math
+import random
 
-from ImageDataAugmentor.image_data_augmentor import *
-from sklearn.model_selection import train_test_split, StratifiedKFold
-from albumentations.core.composition import Compose, OneOf
-from tensorflow.keras import Sequential, layers
-from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
+logging.disable(logging.WARNING)
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 
-tf.get_logger().setLevel('ERROR')
+
+DEBUG_FLAG = False
 devices = tf.config.list_physical_devices('GPU')
 for device in devices:
-   tf.config.experimental.set_memory_growth(device, True) 
-print(devices)
+    tf.config.experimental.set_memory_growth(device, True)
+    print(devices, tf.__version__, tf.keras.__version__,sep='\n')
+
+PATH = os.path.abspath(os.path.join(
+    os.getcwd(), "../../../../datasets/sorghum-id-fgvc-9"))+"/"
+
+TRAIN_DIR = PATH+'train_images/'
+TEST_DIR = PATH+'test/'
 
 
-TASK = "sorghum-id"
-TASK_ID = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-PATH = os.path.abspath(os.path.join(os.getcwd() ,"../../../../datasets/sorghum-id-fgvc-9"))+"/"
+# ---------------------------- VARIABLE DEFINITION --------------------------- #
+# TODO: TASK_ID import SLURM ID in sbatch
+# TODO: BASE_BATCH_SIZE import BASE_BATCH_SIZE ID in sbatch
+class CONFIG:  # Default Values overwritten by batch files input
 
-train_dir = PATH+'train_images/'
-test_dir = PATH+'test/'
+    TASK = "sorghum-id"
+    TASK_ID = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    MODEL = "EfficientNetB7"
+    WEIGHTS = "imagenet"  # WEIGHTS = None
 
-save_dir    = '../results/sorghum/'
-log_dir     = os.path.join("../logs/",''.join([TASK,"-",TASK_ID]))
-model_dir   = os.path.join("../models/",''.join([TASK,"-",TASK_ID]))+'/'
+    NUM_GPUS = len(devices)
+    BASE_BATCH_SIZE = 4
+    BATCH_SIZE = BASE_BATCH_SIZE*NUM_GPUS
+    EPOCH = 100
+    KFOLDS = 5
 
-NUM_GPUS = len(devices)
-base_batch_size = 16
-batch_size = base_batch_size*NUM_GPUS
-epoch = 100
-WIDTH = 512
-HEIGHT = 512
-DEBUG = False
+    LR = 1e-2
+    LR_MIN = 1e-8
 
+    HISTEQ = "CLAHE"  # CLAHE, NONE
 
-image_df = pd.read_csv(PATH+'train_cultivar_mapping.csv')
-image_df.dropna(inplace=True)
+    IM_WIDTH = 512
+    IM_HEIGHT = 512
 
-if DEBUG:
-    image_df=image_df[:2000]
-    epoch = 20
-
-image_df
-
-
-kfold = StratifiedKFold(n_splits=3, shuffle=True)
-
-for train_index, valid_index in kfold.split(image_df['image'],image_df['cultivar']):
-    train_images, valid_images = image_df['image'].iloc[train_index], image_df['image'].iloc[valid_index]
-    train_cultivar, valid_cultivar = image_df['cultivar'].iloc[train_index], image_df['cultivar'].iloc[valid_index]
-
-train_df= pd.DataFrame({'image':train_images, 'cultivar':train_cultivar})
-val_df= pd.DataFrame({'image':valid_images, 'cultivar':valid_cultivar})
-print('Number of Training Samples: ',len(train_df), '    Number of Validation Samples: ', len(val_df))
+    SAVE_DIR = '../results/sorghum/'
+    LOG_DIR = "../logs/"+TASK+"-"+TASK_ID+'-'+MODEL+'-'+str(WEIGHTS)
+    MODEL_DIR = "../models/"+TASK+"-"+TASK_ID+'-'+MODEL+'-'+str(WEIGHTS)+'/'
 
 
-transform = Compose([
-            alb.RandomResizedCrop(height=HEIGHT, width=WIDTH),
-            alb.Flip(p=0.5),
-            alb.RandomRotate90(p=0.5),
-            alb.ShiftScaleRotate(p=0.5),
-            alb.HueSaturationValue(p=0.5),
-            alb.OneOf([
-                alb.RandomBrightnessContrast(p=0.5),
-                alb.RandomGamma(p=0.5),
-            ], p=0.5),
-            OneOf([
-                alb.Blur(p=0.1),
-                alb.GaussianBlur(p=0.1),
-                alb.MotionBlur(p=0.1),
-            ], p=0.1),
-            OneOf([
-                alb.GaussNoise(p=0.1),
-                alb.ISONoise(p=0.1),
-                alb.GridDropout(ratio=0.5, p=0.2),
-                alb.CoarseDropout(max_holes=16, min_holes=8, max_height=16, max_width=16, min_height=8, min_width=8, p=0.2)
-            ], p=0.2)
-        ])
+if __name__ == "__main__":
 
-train_datagen = ImageDataAugmentor(augment=transform)
-val_datagen = ImageDataAugmentor()
+    # -------------------- READ TRAINING IMAGES INTO DATAFIELD ------------------- #
 
-train_augmented = train_datagen.flow_from_dataframe(
-    dataframe=train_df,
-    shuffle=True,
-    directory=train_dir,
-    x_col='image',
-    y_col='cultivar',
-    class_mode='categorical',
-    target_size=(HEIGHT,WIDTH),
-    batch_size=batch_size)
+    image_df = pd.read_csv(PATH+'train_cultivar_mapping.csv')
+    image_df.dropna(inplace=True)
 
-val_augmented = val_datagen.flow_from_dataframe(
-    dataframe=val_df,
-    shuffle=True,
-    directory=train_dir,
-    x_col='image',
-    y_col='cultivar',
-    class_mode='categorical',
-    target_size=(HEIGHT,WIDTH),
-    batch_size=batch_size)
+    if DEBUG_FLAG:
+        image_df = image_df[:2000]
+        CONFIG.EPOCH = 1
 
-num_classes = len(train_augmented.class_indices)
-class_id, num_images = np.unique(train_augmented.classes,return_counts=True)
-max_value = max(num_images)
-class_weights = {c : max_value/n for c,n in zip(class_id, num_images)}
+    # ----------------------------- K-FOLD VALIDATION ---------------------------- #
+
+    kfold = StratifiedKFold(n_splits=CONFIG.KFOLDS, shuffle=True)
+
+    for train_index, valid_index in kfold.split(image_df['image'], image_df['cultivar']):
+        train_images, valid_images = image_df['image'].iloc[train_index], image_df['image'].iloc[valid_index]
+        train_cultivar, valid_cultivar = image_df['cultivar'].iloc[
+            train_index], image_df['cultivar'].iloc[valid_index]
+
+    train_df = pd.DataFrame({'image': train_images, 'cultivar': train_cultivar})
 
 
-def load_model(): # Here we choose our model : Efficientnet B4 pretrained with ImageNet dataset with an input shape of 260x260
-    model = tf.keras.applications.EfficientNetB4(include_top=False,weights='imagenet',input_shape=(HEIGHT,WIDTH,3))
-    return model
+    val_df = pd.DataFrame({'image': valid_images, 'cultivar': valid_cultivar})
+    print('Number of Training Samples: ', len(train_df),
+        '    Number of Validation Samples: ', len(val_df))
 
-def set_nontrainable_layers(model): # We define trainability for the base model
-    model.trainable=False
-    return model
-
-def set_trainable_layers(model): 
-    model.trainable=True
-    return model
-
-def set_quartertrainable_layers(model):
-    model.trainable=True
-    for layer in model.layers:
-        layer.trainable = False
-    for layer in model.layers[-20:]:
-        if not isinstance(layer, layers.BatchNormalization):
-            layer.trainable = True
-    return model
-    
-def set_halftrainable_layers(model):
-    model.trainable=True
-    for layer in model.layers[-round(len(model.layers)*0.5):]:
-        if not isinstance(layer, layers.BatchNormalization):
-            layer.trainable = True
-    return model
-
-def add_last_layers(model): # Here we complete our model with last layers for our problem at hand
-    input_layer = tf.keras.Input(shape=(HEIGHT,WIDTH,3))
-#     base_model = set_quartertrainable_layers(model)
-#     base_model = set_halftrainable_layers(model)
-#     base_model = set_nontrainable_layers(model)
-    base_model = set_trainable_layers(model)
-    flatten_layer = layers.Flatten()
-    global_layer = layers.GlobalAveragePooling2D()
-    dense_layer = layers.Dense(256, activation='relu', kernel_initializer='he_uniform')
-    dropout_layer = layers.Dropout(0.5)
-    prediction_layer = layers.Dense(num_classes, activation='softmax')
-    
-    model = Sequential([
-        input_layer,
-        base_model,
-        global_layer,
-        dropout_layer,
-#         flatten_layer,
-#         dense_layer,
-        prediction_layer
-    ])
-    return model
-
-def build_model(): # We assemble our model and compile it with the proper loss function and metrics for image classification
-    model = load_model()
-    model = add_last_layers(model)
-    
-    opt = tf.keras.optimizers.Adam(learning_rate=1e-4)
-    model.compile(loss='categorical_crossentropy',
-                 optimizer=opt,
-                 metrics=[tf.keras.metrics.CategoricalAccuracy(),
-                 tf.keras.metrics.AUC(),
-                 tf.keras.metrics.Precision(),
-                 tf.keras.metrics.Recall(),
-                 tf.keras.metrics.TruePositives(),
-                 tf.keras.metrics.TrueNegatives(),
-                 tf.keras.metrics.FalsePositives(),
-                 tf.keras.metrics.FalseNegatives()])
-    return model
+    # clahe = cv2.createCLAHE(clipLimit=0.01, tileGridSize=(8,8))
+    # def claheImage(img):
+    #     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    #     gray = gray.astype(np.uint16)
+    #     eq = clahe.apply(gray)
+    #     eq = cv2.cvtColor(eq, cv2.COLOR_GRAY2BGR)
+    #     eq = eq.astype(np.float32)
+    #     return eq
 
 
-strategy = tf.distribute.MirroredStrategy()
-print('Number of devices: {}'.format(strategy.num_replicas_in_sync))
-with strategy.scope():
-    model = build_model()
-model.summary()
+    def CLAHE(img):
+        clahe = cv.createCLAHE(clipLimit=40, tileGridSize=(10, 10))
+        t = np.asarray(img)
+        t = cv.cvtColor(t, cv.COLOR_BGR2HSV)
+        t[:, :, -1] = clahe.apply(t[:, :, -1])
+        t = cv.cvtColor(t, cv.COLOR_HSV2BGR)
+        t = Img.fromarray(t)
+        t = np.array(t)
+        return t
 
 
-es = EarlyStopping(monitor='val_accuracy',
-                   patience=7,
-                   verbose=1,
-                   restore_best_weights=True)
+    # ---------------------------- IMAGE AUGMENTATION ---------------------------- #
+    # TODO: ADD PREPROCESSING (CLAHE)
+    def augments(phase: str):
+        if phase == "train":
+            return Compose([
+                A.RandomResizedCrop(height=CONFIG.IM_HEIGHT, width=CONFIG.IM_WIDTH),
+                A.Flip(p=0.5),
+                A.RandomRotate90(p=0.5),
+                A.ShiftScaleRotate(p=0.5),
+                A.HueSaturationValue(p=0.5),
+                A.OneOf([
+                    A.RandomBrightnessContrast(p=0.5),
+                    A.RandomGamma(p=0.5),
+                ], p=0.5),
+                OneOf([
+                    A.Blur(p=0.1),
+                    A.GaussianBlur(p=0.1),
+                    A.MotionBlur(p=0.1),
+                ], p=0.1),
+                OneOf([
+                    A.GaussNoise(p=0.1),
+                    A.ISONoise(p=0.1),
+                    A.GridDropout(ratio=0.5, p=0.2),
+                    A.CoarseDropout(max_holes=16, min_holes=8, max_height=16,
+                                    max_width=16, min_height=8, min_width=8, p=0.2)
+                ], p=0.2),
+                # A.Normalize(
+                #         mean=[0.485, 0.456, 0.406],
+                #         std=[0.229, 0.224, 0.225],
+                # ),
+            ])
+        else:
+            return Compose([
+                A.RandomResizedCrop(height=CONFIG.IM_HEIGHT, width=CONFIG.IM_WIDTH),
+                # A.Normalize(
+                #     mean=[0.485, 0.456, 0.406],
+                #     std=[0.229, 0.224, 0.225],
+                # ),
+            ])
 
-cp = ModelCheckpoint(save_dir + 'effnetB4-{epoch:04d}.ckpt',
-                     monitor='val_loss',
-                     verbose=1,
-                     save_best_only=True,
-                     save_weights_only=False,
-                     mode='min' )
+    train_datagen = ImageDataAugmentor(augment=augments("train"), preprocess_input=CLAHE)
+    val_datagen = ImageDataAugmentor(augment=augments("val"),preprocess_input=CLAHE)
 
-sv = ModelCheckpoint(model_dir + 'effnetB4-{epoch:04d}.h5',
-                     monitor='val_loss',
-                     verbose=1,
-                     save_best_only=False,
-                     save_weights_only=False,
-                     mode='min' )
+    # ------------------------- READ IMAGES TO GENERATORS ------------------------ #
 
-sv_best = ModelCheckpoint(model_dir + 'effnetB4-optimal.h5',
-                     monitor='val_loss',
-                     verbose=1,
-                     save_best_only=True,
-                     save_weights_only=False,
-                     mode='min' )
+    train_augmented = train_datagen.flow_from_dataframe(
+        dataframe=train_df,
+        shuffle=True,
+        directory=TRAIN_DIR,
+        x_col='image',
+        y_col='cultivar',
+        class_mode='categorical',
+        target_size=(CONFIG.IM_HEIGHT, CONFIG.IM_WIDTH),
+        batch_size=CONFIG.BATCH_SIZE)
 
-csv = tf.keras.callbacks.CSVLogger('../history/'+TASK_ID+'.csv')
+    val_augmented = val_datagen.flow_from_dataframe(
+        dataframe=val_df,
+        shuffle=True,
+        directory=TRAIN_DIR,
+        x_col='image',
+        y_col='cultivar',
+        class_mode='categorical',
+        target_size=(CONFIG.IM_HEIGHT, CONFIG.IM_WIDTH),
+        batch_size=CONFIG.BATCH_SIZE)
 
-tb = tf.keras.callbacks.TensorBoard(log_dir, histogram_freq=1)
+    num_classes = len(train_augmented.class_indices)
+    class_id, num_images = np.unique(train_augmented.classes, return_counts=True)
+    max_value = max(num_images)
+    class_weights = {c: max_value/n for c, n in zip(class_id, num_images)}
 
-reduce_lr = tf.keras.callbacks.ReduceLROnPlateau(monitor='val_loss', 
-                                                 factor=0.4,
-                                                 verbose=1,
-                                                 patience=2, 
-                                                 min_lr=1e-6)
+    # ---------------------------------------------------------------------------- #
+    #                                   TRAINING                                   #
+    # ---------------------------------------------------------------------------- #
 
-
-STEP_SIZE_TRAIN = train_augmented.n//train_augmented.batch_size
-STEP_SIZE_VALID = val_augmented.n//val_augmented.batch_size
-
-
-model.fit(train_augmented,
-          epochs=epoch,
-          steps_per_epoch=STEP_SIZE_TRAIN,
-          callbacks=[es,tb,sv,sv_best,reduce_lr,csv],
-          verbose=2,
-          class_weight=class_weights,
-          validation_data=val_augmented,
-          validation_steps=STEP_SIZE_VALID)
+    # ------------------------- MODEL FUNCTION DEFINITION ------------------------ #
 
 
-## INFERENCE
+    def create_model():
 
-sample_submission = pd.read_csv(PATH+'sample_submission.csv')
+        tf.keras.backend.clear_session()
 
-test_gen= ImageDataAugmentor()
-test_generator = test_gen.flow_from_dataframe(dataframe=sample_submission,
-                                              directory=test_dir,
-                                              x_col='filename',
-                                              y_col=None,
-                                              target_size=(WIDTH,HEIGHT),
-                                              color_mode='rgb',
-                                              class_mode=None,
-                                              batch_size=1,
-                                              shuffle=False,)
+        strategy = tf.distribute.MirroredStrategy()
+        print('Number of devices: {}'.format(strategy.num_replicas_in_sync))
+        with strategy.scope():
+            backbone = tf.keras.applications.EfficientNetB7(
+                include_top=False, weights=CONFIG.WEIGHTS, input_shape=(CONFIG.IM_HEIGHT, CONFIG.IM_WIDTH, 3))
+            backbone.trainable = True
+            model = Sequential([
+                # TODO
+                tf.keras.Input(shape=(CONFIG.IM_HEIGHT, CONFIG.IM_WIDTH, 3)),
+                backbone,
+                layers.GlobalAveragePooling2D(),
+                layers.Dropout(0.5),
+                layers.Dense(num_classes, activation='softmax')
+            ])
 
-STEP_SIZE_TEST=test_generator.n//test_generator.batch_size
-STEP_SIZE_TEST,test_generator.n,test_generator.batch_size
+            opt = tf.keras.optimizers.Adam(learning_rate=1e-4)
+            model.compile(loss='categorical_crossentropy',
+                        optimizer=opt,
+                        metrics=[tf.keras.metrics.CategoricalAccuracy(),
+                                tf.keras.metrics.Precision(),
+                                tf.keras.metrics.Recall(),
+                                # DEBUG:
+                                tfa.metrics.F1Score(
+                                    average='macro', num_classes=num_classes),
+                                ])
+        model.summary()
+        return model
 
-MODEL_PATH = model_dir+"effnetB4-optimal.h5"
 
-model = tf.keras.models.load_model(MODEL_PATH)
+    model = create_model()
 
-test_generator.reset()
-results = model.predict(test_generator,verbose=1,steps=STEP_SIZE_TEST)
+    # --------------------------------- CALLBACKS -------------------------------- #
 
-predicted_class_indices=np.argmax(results,axis=1)
+    es = EarlyStopping(monitor='val_categorical_accuracy',
+                    min_delta=0.01,
+                    patience=10,
+                    verbose=1,
+                    restore_best_weights=True)
 
-labels = (train_augmented.class_indices)
-labels = dict((v,k) for k,v in labels.items())
-predictions = [labels[k] for k in predicted_class_indices]
+    # cp = ModelCheckpoint(SAVE_DIR + MODEL +'-{epoch:04d}-{val_loss:.4f}-{val_accuracy:.4f}.ckpt',
+    #                      monitor='val_loss',
+    #                      verbose=1,
+    #                      save_best_only=True,
+    #                      save_weights_only=False,
+    #                      mode='min')
 
-filenames=test_generator.filenames
-submission=pd.DataFrame({"Filename":[filename.replace('all_classes/','')for filename in filenames],
-                      "cultivar":predictions})
+    # DEBUG:
+    sv = ModelCheckpoint(CONFIG.MODEL_DIR + CONFIG.MODEL + '-{epoch:03d}-{val_loss:.4f}.h5',
+                        monitor='val_loss',
+                        verbose=1,
+                        save_best_only=False,
+                        save_weights_only=False,
+                        mode='min')
 
-submission_name = save_dir+'submission_EfficientnetB4ImageNet'+TASK_ID+'.csv'
-submission.to_csv(submission_name,index=False)
+    sv_best = ModelCheckpoint(CONFIG.MODEL_DIR + CONFIG.MODEL + '-optimal.h5',
+                            monitor='val_loss',
+                            verbose=1,
+                            save_best_only=True,
+                            save_weights_only=False,
+                            mode='min')
 
-#!kaggle competitions submit -c sorghum-id-fgvc-9 -f $submission_name -m "With flow from dataframe generator"
+    csv = tf.keras.callbacks.CSVLogger(
+        '../history/'+CONFIG.MODEL+CONFIG.TASK_ID+'.csv')
+
+    tb = tf.keras.callbacks.TensorBoard(CONFIG.LOG_DIR, histogram_freq=1)
+    # ,save_freq='epoch'
+    reduce_lr = tf.keras.callbacks.ReduceLROnPlateau(monitor='val_loss',
+                                                    factor=0.4,
+                                                    verbose=1,
+                                                    patience=2,
+                                                    min_lr=1e-8)
+
+    # ------------------------------- TRAINING LOOP ------------------------------ #
+
+    STEP_SIZE_TRAIN = train_augmented.n//train_augmented.batch_size
+    STEP_SIZE_VALID = val_augmented.n//val_augmented.batch_size
+
+    # TODO: Create Custom Training Loop (https://www.tensorflow.org/tensorboard/get_started) for use with tf.summary()
+
+    # NOTE: LOG GPU stats with tensorbpard too?
+
+    history = model.fit(train_augmented,
+                        epochs=CONFIG.EPOCH,
+                        steps_per_epoch=STEP_SIZE_TRAIN,
+                        callbacks=[es, tb, sv, sv_best, reduce_lr, csv],
+                        verbose=2,
+                        class_weight=class_weights,
+                        validation_data=val_augmented,
+                        validation_steps=STEP_SIZE_VALID)
+
+    # ---------------------------------------------------------------------------- #
+    #                                   INFERENCE                                  #
+    # ---------------------------------------------------------------------------- #
+    # DEBUG:
+    # -------------------------- READ SAMPLE SUBMISSION -------------------------- #
+
+    sample_submission = pd.read_csv(PATH+'sample_submission.csv')
+
+    test_gen = ImageDataAugmentor(augment=augments("test"),preprocess_input=CLAHE)
+    test_generator = test_gen.flow_from_dataframe(dataframe=sample_submission,
+                                                directory=TEST_DIR,
+                                                x_col='filename',
+                                                y_col=None,
+                                                target_size=(
+                                                    CONFIG.IM_WIDTH, CONFIG.IM_HEIGHT),
+                                                color_mode='rgb',
+                                                class_mode=None,
+                                                batch_size=1,
+                                                shuffle=False,)
+
+    STEP_SIZE_TEST = test_generator.n//test_generator.batch_size
+
+    MODEL_PATH = CONFIG.MODEL_DIR + CONFIG.MODEL + '-optimal.h5'
+
+    # ---------- LOAD OPTIMAL MODEL FROM LAST RUN AND PERFORM PREDICTION --------- #
+
+    model = tf.keras.models.load_model(MODEL_PATH)
+
+    test_generator.reset()
+    results = model.predict(test_generator, verbose=2, steps=STEP_SIZE_TEST)
+
+    # ------------------------- WRITE PREDICTIONS TO FILE ------------------------ #
+
+    predicted_class_indices = np.argmax(results, axis=1)
+
+    labels = (train_augmented.class_indices)
+    labels = dict((v, k) for k, v in labels.items())
+    predictions = [labels[k] for k in predicted_class_indices]
+
+    filenames = test_generator.filenames
+    submission = pd.DataFrame({"Filename": [filename.replace('all_classes/', '')for filename in filenames],
+                            "cultivar": predictions})
+
+    v_loss = history.history['val_loss']
+
+    submission_name = CONFIG.SAVE_DIR+'submission-'+CONFIG.MODEL + \
+        '-'+str(CONFIG.WEIGHTS)+'-'+CONFIG.TASK_ID+'.csv'
+    submission.to_csv(submission_name, index=False)
+
+    # ----------------------------- SUBMIT TO KAGGLE ----------------------------- #
+    msg = CONFIG.MODEL+'-'+str(CONFIG.BATCH_SIZE)+'-'+CONFIG.TASK_ID
+
+    os.system('kaggle competitions submit -c sorghum-id-fgvc-9 -f ' +
+            submission_name+' -m "'+msg+'"')
+    #!kaggle competitions submit -c sorghum-id-fgvc-9 -f $submission_name -m "With flow from dataframe generator"

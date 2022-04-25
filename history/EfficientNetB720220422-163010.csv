@@ -1,0 +1,2 @@
+epoch,categorical_accuracy,f1_score,loss,lr,precision,recall,val_categorical_accuracy,val_f1_score,val_loss,val_precision,val_recall
+0,0.0209145899862051,0.020604176446795464,6.138612270355225,1e-04,0.0,0.0,0.06182065233588219,0.04471350088715553,4.425631523132324,0.0,0.0
