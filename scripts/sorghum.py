@@ -340,7 +340,7 @@ def inference():
     submission.to_csv(submission_name, index=False)
 
     if not DEBUG_FLAG:
-        submit(submission, CONFIG)
+        submit(submission_name, CONFIG)
 
 def submit(submission, CONFIG):
 
