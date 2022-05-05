@@ -4,3 +4,6 @@
 *.gz
 logs/*
 slurm/*
+results/*
+results/sorghum/*
+results/sorghum/old/*

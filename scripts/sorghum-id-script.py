@@ -55,12 +55,12 @@ class CONFIG:  # Default Values overwritten by batch files input
     WEIGHTS = "imagenet"  # WEIGHTS = None
 
     NUM_GPUS = len(devices)
-    BASE_BATCH_SIZE = 4
+    BASE_BATCH_SIZE = 8
     BATCH_SIZE = BASE_BATCH_SIZE*NUM_GPUS
-    EPOCH = 100
+    EPOCH = 1
     KFOLDS = 5
 
-    LR = 1e-2
+    LR = 1e-4
     LR_MIN = 1e-8
 
     HISTEQ = "CLAHE"  # CLAHE, NONE

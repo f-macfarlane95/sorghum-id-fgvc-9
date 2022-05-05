@@ -1,10 +1,10 @@
-from curses.ascii import SUB
 import os
 import sys
 import math
 import random
 import datetime
 import logging
+import pickle
 
 logging.disable(logging.WARNING)
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
@@ -34,8 +34,8 @@ for device in devices:
 print("No. GPUs : "+str(len(devices)), "Tensorflow == "+tf.__version__, "Keras == "+tf.keras.__version__, sep='\n')
 
 class SorghumCONFIG(object):
-    TASK = "sorghum_id"
-    TASK_ID = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    TASK = "sorghum-id"
+    TASK_ID = datetime.datetime.now().strftime("%Y-%m-%d-%H%M%S")
 
     MODEL = "EfficientNetB4"
     WEIGHTS = "imagenet"  # WEIGHTS = None
@@ -56,7 +56,7 @@ class SorghumCONFIG(object):
     EARLY_STOPPING_PATIENCE = 10
     EARLY_STOPPING_DELTA = 0.01
 
-    LR = 1e-3
+    LR = 1e-4
     LR_MIN = 1e-8
 
     def __init__(self):
@@ -110,25 +110,44 @@ def create_model():
         elif CONFIG.MODEL == "EfficientNetB7":
             backbone = tf.keras.applications.EfficientNetB7(
                 include_top=False, weights=CONFIG.WEIGHTS, input_shape=(CONFIG.IM_HEIGHT, CONFIG.IM_WIDTH, 3))
-        
+
+        elif CONFIG.MODEL == "EfficientNetV2S":
+            backbone = tf.keras.applications.EfficientNetV2S(
+                include_top=False, weights=CONFIG.WEIGHTS, input_shape=(CONFIG.IM_HEIGHT, CONFIG.IM_WIDTH, 3))
+
+        elif CONFIG.MODEL == "EfficientNetV2M":
+            backbone = tf.keras.applications.EfficientNetV2M(
+                include_top=False, weights=CONFIG.WEIGHTS, input_shape=(CONFIG.IM_HEIGHT, CONFIG.IM_WIDTH, 3))
+
+        elif CONFIG.MODEL == "EfficientNetV2L":
+            backbone = tf.keras.applications.EfficientNetV2L(
+                include_top=False, weights=CONFIG.WEIGHTS, input_shape=(CONFIG.IM_HEIGHT, CONFIG.IM_WIDTH, 3))
+
         else:
             backbone = tf.keras.applications.EfficientNetB4(
                 include_top=False, weights=CONFIG.WEIGHTS, input_shape=(CONFIG.IM_HEIGHT, CONFIG.IM_WIDTH, 3))
 
         backbone.trainable = True
-        model = Sequential([
-            tf.keras.Input(shape=(CONFIG.IM_HEIGHT, CONFIG.IM_WIDTH, 3)),
-            backbone,
-            layers.GlobalAveragePooling2D(),
-            layers.Dropout(0.5),
-            layers.Dense(CONFIG.NUM_CLASSES, activation='softmax')
-        ])
 
+        inputs = tf.keras.Input(shape=(CONFIG.IM_HEIGHT, CONFIG.IM_WIDTH, 3))
+        x = backbone(inputs)
+        x = tf.keras.layers.GlobalAveragePooling2D()(x)
+        x = tf.keras.layers.Dropout(0.5)(x)
+        outputs = tf.keras.layers.Dense(CONFIG.NUM_CLASSES, activation="softmax", dtype='float32')(x)
+        model = tf.keras.Model(inputs, outputs)
 
-        if CONFIG.OPTIMISER == "adam":
+        if CONFIG.OPTIMISER == "adam" or "Adam":
             opt = tf.keras.optimizers.Adam(learning_rate=CONFIG.LR)
-        elif CONFIG.OPTIMISER == "adamW" | "adamw":
+        elif CONFIG.OPTIMISER == "adamW" or "adamw":
+            opt = tf.keras.optimizers.Adam(learning_rate=CONFIG.LR)
+        elif CONFIG.OPTIMISER == "Radam" or "RAdam":
+            opt = tfa.optimizers.RectifiedAdam(learning_rate=CONFIG.LR)
+        elif CONFIG.OPTIMISER == "sgd" or "SGD":
+            opt = tf.keras.optimizers.SGD(learning_rate=CONFIG.LR, momentum=0.9)
+        elif CONFIG.OPTIMISER == "adabound" or "AdaBound":
             pass
+        elif CONFIG.OPTIMISER == "adabelief" or "AdaBelief":
+            opt = tfa.optimizers.AdaBelief(learning_rate=CONFIG.LR)  
         else:
             print("Unrecognised optimiser string in config, defaulting to Adam optimisation")
             opt = tf.keras.optimizers.Adam(learning_rate=CONFIG.LR)
@@ -141,8 +160,8 @@ def create_model():
                             tf.keras.metrics.Recall(),
                             tfa.metrics.F1Score(average='macro', num_classes=CONFIG.NUM_CLASSES),
                             ])
-    model.summary()
-    return model
+        model.summary()
+        return model
 
 def load_data():
     image_df = pd.read_csv(PATH+'train_cultivar_mapping.csv')
@@ -154,6 +173,8 @@ def load_data():
         CONFIG.NUM_EPOCHS = 2
     image_df
 
+
+    #TODO: Find "best" k-fold strategy 1-10
     kfold = StratifiedKFold(n_splits=CONFIG.KFOLDS, shuffle=True)
 
     for train_index, valid_index in kfold.split(image_df['image'], image_df['cultivar']):
@@ -209,19 +230,22 @@ def augment_data(phase: str):
                     A.CoarseDropout(max_holes=16, min_holes=8, max_height=16,
                                     max_width=16, min_height=8, min_width=8, p=0.2)
                 ], p=0.2),
-                NORMALISE(p=1),
+                #A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225],p=1),
                 
         ])
     else:
         return Compose([
                 CLAHE(p=1),
                 A.Resize(height=CONFIG.IM_HEIGHT, width=CONFIG.IM_WIDTH),
-                NORMALISE(p=1),
+                #A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225],p=1),
         ])
+
+#TODO: Add TTA with 90 rotations and random Rotation (+1.5% in tests)
+
 
 def train_model():
     
-    es = EarlyStopping(monitor = 'val_categorical_accuracy',
+    es = EarlyStopping(monitor = 'val_loss',
                        min_delta = CONFIG.EARLY_STOPPING_DELTA,
                        patience = CONFIG.EARLY_STOPPING_PATIENCE,
                        verbose = 1,
@@ -288,6 +312,8 @@ def train_model():
     CONFIG.STEP_SIZE_TRAIN = train_augmented.n//train_augmented.batch_size
     CONFIG.STEP_SIZE_VALID = val_augmented.n//val_augmented.batch_size
 
+    CONFIG.display() 
+
     history = model.fit(train_augmented,
                         epochs=CONFIG.NUM_EPOCHS,
                         steps_per_epoch=CONFIG.STEP_SIZE_TRAIN,
@@ -309,8 +335,7 @@ def inference():
                                                 directory=TEST_DIR,
                                                 x_col='filename',
                                                 y_col=None,
-                                                target_size=(
-                                                    CONFIG.IM_WIDTH, CONFIG.IM_HEIGHT),
+                                                target_size=(CONFIG.IM_HEIGHT, CONFIG.IM_WIDTH),
                                                 color_mode='rgb',
                                                 class_mode=None,
                                                 batch_size=1,
@@ -336,7 +361,7 @@ def inference():
                             "cultivar": predictions})
 
     submission_name = SAVE_DIR+'submission-'+CONFIG.MODEL + \
-        '-'+str(CONFIG.WEIGHTS)+'-'+CONFIG.TASK_ID+'.csv'
+        '-'+str(CONFIG.BATCH_SIZE)+'-'+CONFIG.TASK_ID+'.csv'
     submission.to_csv(submission_name, index=False)
 
     if not DEBUG_FLAG:
@@ -344,7 +369,7 @@ def inference():
 
 def submit(submission, CONFIG):
 
-    msg = CONFIG.MODEL+'-'+CONFIG.BATCH_SIZE+'-'+CONFIG.TASK_ID
+    msg = CONFIG.MODEL+'-'+CONFIG.OPTIMISER+'-'+str(CONFIG.BATCH_SIZE)+'-'+CONFIG.TASK_ID
     os.system('kaggle competitions submit -c sorghum-id-fgvc-9 -f ' + submission+' -m "'+msg+'"')
 
 if __name__ == "__main__":
@@ -406,7 +431,7 @@ if __name__ == "__main__":
         CONFIG.NUM_EPOCHS = args.epochs
         print("Num. Epochs has been set (value is %s)" % args.epochs)
 
-    if args.epochs is not None:
+    if args.kfolds is not None:
         CONFIG.KFOLDS = args.kfolds
         print("Num. K Folds has been set (value is %s)" % args.kfolds)
 
