@@ -7,3 +7,4 @@ slurm/*
 results/*
 results/sorghum/*
 results/sorghum/old/*
+history/*
