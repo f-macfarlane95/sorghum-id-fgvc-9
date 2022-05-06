@@ -14,6 +14,7 @@ import numpy as np
 
 import tensorflow_addons as tfa
 from keras import Sequential, layers
+from keras_cv_attention_models import efficientnet
 from keras.callbacks import EarlyStopping, ModelCheckpoint, CSVLogger, TensorBoard, ReduceLROnPlateau
 import tensorflow as tf
 
@@ -123,6 +124,9 @@ def create_model():
             backbone = tf.keras.applications.EfficientNetV2L(
                 include_top=False, weights=CONFIG.WEIGHTS, input_shape=(CONFIG.IM_HEIGHT, CONFIG.IM_WIDTH, 3))
 
+        #TODO: Add EffNetV2XL compatibility from keras_cv_attention_models
+        elif CONFIG.MODEL == "EfficientNetV2XL":
+            backbone = efficientnet.EfficientNetV2XL(include_preprocessing=False, num_classes=0) #norm layer and no top
         else:
             backbone = tf.keras.applications.EfficientNetB4(
                 include_top=False, weights=CONFIG.WEIGHTS, input_shape=(CONFIG.IM_HEIGHT, CONFIG.IM_WIDTH, 3))
