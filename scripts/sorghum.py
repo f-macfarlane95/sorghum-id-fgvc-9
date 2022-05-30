@@ -1,3 +1,4 @@
+from genericpath import isdir
 import os
 import sys
 import math
@@ -56,6 +57,13 @@ class SorghumCONFIG(object):
     STEPS_BEFORE_LR_DECAY = 2
     EARLY_STOPPING_PATIENCE = 10
     EARLY_STOPPING_DELTA = 0.01
+
+    USE_MS_DROPOUT = False
+    MS_DROPOUT_SAMPLES = 8
+    MS_DROPOUT_VALUE = 0.5 # not used if "range is input"
+
+    USE_TTA = True
+
 
     LR = 1e-4
     LR_MIN = 1e-8
@@ -136,14 +144,29 @@ def create_model():
         inputs = tf.keras.Input(shape=(CONFIG.IM_HEIGHT, CONFIG.IM_WIDTH, 3))
         x = backbone(inputs)
         x = tf.keras.layers.GlobalAveragePooling2D()(x)
-        x = tf.keras.layers.Dropout(0.5)(x)
-        outputs = tf.keras.layers.Dense(CONFIG.NUM_CLASSES, activation="softmax", dtype='float32')(x)
+
+        # Multi-Sample Dropout
+        if CONFIG.MS_DROPOUT_SAMPLES > 1:
+            dense = []
+            FCDense = tf.keras.layers.Dense(512, activation="relu", dtype='float32')
+            FC = tf.keras.layers.Dense(CONFIG.NUM_CLASSES, activation='softmax', dtype='float32')
+            for p in np.repeat(CONFIG.MS_DROPOUT_VALUE,CONFIG.MS_DROPOUT_SAMPLES):
+                # x = FCDense(x)
+                x = tf.keras.layers.Dropout(p)(x)
+                x = FC(x)
+                dense.append(x)
+            outputs = tf.keras.layers.Average()(dense)
+        else:
+            # x = FCDense(x)
+            x = tf.keras.layers.Dropout(0.5)(x)
+            outputs = tf.keras.layers.Dense(CONFIG.NUM_CLASSES, activation="softmax", dtype='float32')(x)
+        
         model = tf.keras.Model(inputs, outputs)
 
         if CONFIG.OPTIMISER == "adam" or "Adam":
             opt = tf.keras.optimizers.Adam(learning_rate=CONFIG.LR)
         elif CONFIG.OPTIMISER == "adamW" or "adamw":
-            opt = tf.keras.optimizers.Adam(learning_rate=CONFIG.LR)
+            opt = tfa.optimizers.AdamW(learning_rate=CONFIG.LR, weight_decay=4e-4, amsgrad=True)
         elif CONFIG.OPTIMISER == "Radam" or "RAdam":
             opt = tfa.optimizers.RectifiedAdam(learning_rate=CONFIG.LR)
         elif CONFIG.OPTIMISER == "sgd" or "SGD":
@@ -168,7 +191,7 @@ def create_model():
         return model
 
 def load_data():
-    image_df = pd.read_csv(PATH+'train_cultivar_mapping.csv')
+    image_df = pd.read_csv(WORKING_DIR+'/train_cultivar_mapping.csv')
     image_df.dropna(inplace=True)
 
     if DEBUG_FLAG:
@@ -253,14 +276,7 @@ def train_model():
                        min_delta = CONFIG.EARLY_STOPPING_DELTA,
                        patience = CONFIG.EARLY_STOPPING_PATIENCE,
                        verbose = 1,
-                       restore_best_weights = True)
-
-    sv = ModelCheckpoint(MODEL_DIR + CONFIG.MODEL + '-{epoch:03d}-{val_loss:.4f}.h5',
-                         monitor = 'val_loss',
-                         verbose = 1,
-                         save_best_only = False,
-                         save_weights_only = False,
-                         mode = 'min')
+                       restore_best_weights = False)
 
     sv_best = ModelCheckpoint(MODEL_DIR + CONFIG.MODEL + '-optimal.h5',
                               monitor = 'val_loss',
@@ -268,6 +284,15 @@ def train_model():
                               save_best_only = True,
                               save_weights_only = False,
                               mode = 'min')
+                              
+    sv = ModelCheckpoint(MODEL_DIR + CONFIG.MODEL + '-{epoch:03d}-{val_loss:.4f}.h5',
+                         monitor = 'val_loss',
+                         verbose = 1,
+                         save_best_only = False,
+                         save_weights_only = True,
+                         mode = 'min')
+
+    
 
     reduce_lr = ReduceLROnPlateau(monitor = 'val_loss',
                                   factor = 0.4,
@@ -275,7 +300,7 @@ def train_model():
                                   patience = CONFIG.STEPS_BEFORE_LR_DECAY,
                                   min_lr = CONFIG.LR_MIN)
 
-    csv = CSVLogger('../history/' + CONFIG.MODEL + CONFIG.TASK_ID + '.csv')
+    csv = CSVLogger(WORKING_DIR+'/history/' + CONFIG.MODEL + CONFIG.TASK_ID + '.csv')
 
     tb = TensorBoard(LOG_DIR, histogram_freq=1)
 
@@ -307,7 +332,7 @@ def train_model():
         target_size=(CONFIG.IM_HEIGHT, CONFIG.IM_WIDTH),
         batch_size=CONFIG.BATCH_SIZE)
 
-    CONFIG.NUM_CLASSES = len(train_augmented.class_indices)
+    NUM_CLASSES = len(train_augmented.class_indices)
     CONFIG.CLASS_INDICES = train_augmented.class_indices
     CONFIG.CLASS_ID, CONFIG.NUM_IMAGES = np.unique(train_augmented.classes, return_counts=True)
     CONFIG.MAX_VALUE = max(CONFIG.NUM_IMAGES)
@@ -316,12 +341,12 @@ def train_model():
     CONFIG.STEP_SIZE_TRAIN = train_augmented.n//train_augmented.batch_size
     CONFIG.STEP_SIZE_VALID = val_augmented.n//val_augmented.batch_size
 
-    CONFIG.display() 
-
     history = model.fit(train_augmented,
                         epochs=CONFIG.NUM_EPOCHS,
                         steps_per_epoch=CONFIG.STEP_SIZE_TRAIN,
-                        callbacks=[es, tb, sv, sv_best, reduce_lr, csv],
+                        #callbacks=[es, tb, sv_best, sv, reduce_lr, csv],
+                        #callbacks=[es, tb, sv_best, reduce_lr, csv],
+                        callbacks=[tb, es, csv, reduce_lr, sv_best],
                         verbose=2,
                         class_weight=CONFIG.CLASS_WEIGHTS,
                         validation_data=val_augmented,
@@ -329,8 +354,8 @@ def train_model():
 
 def inference():
     tf.keras.backend.clear_session()
-    sample_submission = pd.read_csv(PATH+'sample_submission.csv')
-
+    sample_submission = pd.read_csv(WORKING_DIR+'/sample_submission.csv')
+    sample_submission.filename = sample_submission.filename.map(lambda x: x.split('.png')[0] + '.jpeg')
     if DEBUG_FLAG:
         sample_submission=sample_submission.head(100)
 
@@ -364,16 +389,80 @@ def inference():
     submission = pd.DataFrame({"Filename": [filename.replace('all_classes/', '')for filename in filenames],
                             "cultivar": predictions})
 
+    submission.Filename = submission.Filename.map(lambda x: x.split('.jpeg')[0] + '.png')
+
     submission_name = SAVE_DIR+'submission-'+CONFIG.MODEL + \
-        '-'+str(CONFIG.BATCH_SIZE)+'-'+CONFIG.TASK_ID+'.csv'
+        '-'+str(CONFIG.BATCH_SIZE)+'-'+str(CONFIG.KFOLDS)+'folds-'+CONFIG.TASK_ID+'.csv'
+    submission.to_csv(submission_name, index=False)
+
+    if not DEBUG_FLAG:
+        submit(submission_name, CONFIG)
+
+def tta_inference():
+
+    tf.keras.backend.clear_session()
+    TTA = [
+        Compose([CLAHE(p=1), A.Resize(height=CONFIG.IM_HEIGHT, width=CONFIG.IM_WIDTH), A.Affine(rotate=0,p=1),]),
+        Compose([CLAHE(p=1), A.Resize(height=CONFIG.IM_HEIGHT, width=CONFIG.IM_WIDTH), A.Affine(rotate=90,p=1),]),
+        Compose([CLAHE(p=1), A.Resize(height=CONFIG.IM_HEIGHT, width=CONFIG.IM_WIDTH), A.Affine(rotate=180,p=2),]),
+        Compose([CLAHE(p=1), A.Resize(height=CONFIG.IM_HEIGHT, width=CONFIG.IM_WIDTH), A.Affine(rotate=270,p=3),]),
+        Compose([CLAHE(p=1), A.Resize(height=CONFIG.IM_HEIGHT, width=CONFIG.IM_WIDTH), A.HorizontalFlip(p=1), A.Affine(rotate=0,p=1),]),
+        Compose([CLAHE(p=1), A.Resize(height=CONFIG.IM_HEIGHT, width=CONFIG.IM_WIDTH), A.HorizontalFlip(p=1), A.Affine(rotate=90,p=1),]),
+        Compose([CLAHE(p=1), A.Resize(height=CONFIG.IM_HEIGHT, width=CONFIG.IM_WIDTH), A.HorizontalFlip(p=1), A.Affine(rotate=180,p=2),]),
+        Compose([CLAHE(p=1), A.Resize(height=CONFIG.IM_HEIGHT, width=CONFIG.IM_WIDTH), A.HorizontalFlip(p=1), A.Affine(rotate=270,p=3),]),
+        Compose([CLAHE(p=1), A.Resize(height=CONFIG.IM_HEIGHT, width=CONFIG.IM_WIDTH), A.ShiftScaleRotate(p=1),]),
+    ]
+
+    sample_submission = pd.read_csv(WORKING_DIR+'/sample_submission.csv')
+    sample_submission.filename = sample_submission.filename.map(lambda x: x.split('.png')[0] + '.jpeg')
+
+    results_aggregated = np.zeros([23639,CONFIG.NUM_CLASSES],dtype=np.float32)
+    results_collated = np.zeros([23639,CONFIG.NUM_CLASSES,len(TTA)],dtype=np.float32)
+
+    MODEL_PATH = MODEL_DIR + CONFIG.MODEL + '-optimal.h5'
+    model = tf.keras.models.load_model(MODEL_PATH)
+
+    for i, tta in enumerate(TTA):
+        test_gen = ImageDataAugmentor(augment=tta)
+        test_generator = test_gen.flow_from_dataframe(dataframe=sample_submission,
+                                                directory=TEST_DIR,
+                                                x_col='filename',
+                                                y_col=None,
+                                                target_size=(CONFIG.IM_WIDTH,CONFIG.IM_HEIGHT),
+                                                class_mode=None,
+                                                batch_size=1,
+                                                shuffle=False,)
+
+        STEP_SIZE_TEST=test_generator.n//test_generator.batch_size
+        STEP_SIZE_TEST,test_generator.n,test_generator.batch_size
+        
+        test_generator.reset()
+        results = model.predict(test_generator,verbose=2,steps=STEP_SIZE_TEST)
+        results_collated[:,:,i] = results
+        results_aggregated += results
+
+    results_aggregated = results_aggregated/len(TTA)
+    predicted_class_indices=np.argmax(results_aggregated,axis=1)
+
+    labels = (CONFIG.CLASS_INDICES)
+    labels_dict = dict((v,k) for k,v in labels.items())
+    predictions = [labels_dict[k] for k in predicted_class_indices]
+
+    filenames=test_generator.filenames
+    submission=pd.DataFrame({"Filename":[filename.replace('all_classes/','')for filename in filenames],
+                      "cultivar":predictions})
+
+    submission.Filename = submission.Filename.map(lambda x: x.split('.jpeg')[0] + '.png')
+
+    submission_name = SAVE_DIR+'submission-'+CONFIG.MODEL + \
+        '-'+str(CONFIG.BATCH_SIZE)+'-'+str(CONFIG.KFOLDS)+'folds-'+CONFIG.TASK_ID+'.csv'
     submission.to_csv(submission_name, index=False)
 
     if not DEBUG_FLAG:
         submit(submission_name, CONFIG)
 
 def submit(submission, CONFIG):
-
-    msg = CONFIG.MODEL+'-'+CONFIG.OPTIMISER+'-'+str(CONFIG.BATCH_SIZE)+'-'+CONFIG.TASK_ID
+    msg = CONFIG.MODEL+'-'+CONFIG.OPTIMISER+'-'+str(CONFIG.BATCH_SIZE)+'-'+str(CONFIG.KFOLDS)+'folds-'+CONFIG.TASK_ID+" with MS Dropout and TTA"
     os.system('kaggle competitions submit -c sorghum-id-fgvc-9 -f ' + submission+' -m "'+msg+'"')
 
 if __name__ == "__main__":
@@ -404,15 +493,18 @@ if __name__ == "__main__":
     parser.add_argument('--es_steps', type=int, required=False,
                         help='epochs arg for printing')  
     parser.add_argument('--es_delta', type=float, required=False,
-                        help='epochs arg for printing')               
+                        help='epochs arg for printing')            
+    parser.add_argument('--ms_dropouts', type=int, required=False,
+                        help='epochs arg for printing')      
 
     args = parser.parse_args()
     CONFIG = SorghumCONFIG()
 
-
     if args.path is not None:
         PATH = args.path
         print("Path has been set (value is %s)" % args.path)
+    else:
+        PATH = os.path.abspath(os.path.join(os.getcwd(), "../../../../datasets/sorghum-id-fgvc-9"))+"/"
 
     if args.batch is not None:
         CONFIG.IMAGES_PER_GPU = args.batch
@@ -458,31 +550,38 @@ if __name__ == "__main__":
     if args.es_delta is not None:
         CONFIG.EARLY_STOPPING_DELTA = args.es_delta
         print("Early Stopping Delta has been set (value is %s)" % args.es_delta)
+
+    if args.ms_dropouts is not None:
+        CONFIG.MS_DROPOUT_SAMPLES = args.ms_dropouts
+        print("Number of Dropouts has been set (value is %s)" % args.ms_dropouts)
         
     CONFIG.display() 
-    
-    
 
-    PATH = os.path.abspath(os.path.join(os.getcwd(), "../../../../datasets/sorghum-id-fgvc-9"))+"/"
-    TRAIN_DIR = PATH+'train_images/'
-    TEST_DIR = PATH+'test/'
+    WORKING_DIR = os.getcwd()
+    TRAIN_DIR = WORKING_DIR+'/train/'
+    TEST_DIR = WORKING_DIR+'/test/'
 
-    SAVE_DIR    = '../results/sorghum/'
-    LOG_DIR     = "../logs/"+CONFIG.TASK+"-"+CONFIG.TASK_ID+'-'+CONFIG.MODEL+'-'+str(CONFIG.WEIGHTS)
-    MODEL_DIR   = "../models/"+CONFIG.TASK+"-"+CONFIG.TASK_ID+'-'+CONFIG.MODEL+'-'+str(CONFIG.WEIGHTS)+'/'
-    HIST_DIR    = "../history/"+CONFIG.TASK+"-"+CONFIG.TASK_ID+'-'+CONFIG.MODEL+'-'+str(CONFIG.WEIGHTS)+'/'
-    SUB_DIR     = "../submissions/"+CONFIG.TASK+"-"+CONFIG.TASK_ID+'-'+CONFIG.MODEL+'-'+str(CONFIG.WEIGHTS)+'/'
+    SAVE_DIR    = WORKING_DIR+"/results/sorghum/"
+    LOG_DIR     = WORKING_DIR+"/logs/"+CONFIG.TASK+'-'+CONFIG.MODEL+'-'+str(CONFIG.WEIGHTS)+'-'+str(CONFIG.KFOLDS)+"fold-"+CONFIG.TASK_ID
+    MODEL_DIR   = WORKING_DIR+"/models/"+CONFIG.TASK+'-'+CONFIG.MODEL+'-'+str(CONFIG.WEIGHTS)+'-'+str(CONFIG.KFOLDS)+"fold-"+CONFIG.TASK_ID+'/'
+    HIST_DIR    = WORKING_DIR+"/history/"+CONFIG.TASK+'-'+CONFIG.MODEL+'-'+str(CONFIG.WEIGHTS)+'-'+str(CONFIG.KFOLDS)+"fold-"+CONFIG.TASK_ID+'/'
 
     DEBUG_FLAG = False
 
     print(PATH)
     print(TRAIN_DIR)
     print(TEST_DIR)
+    print(WORKING_DIR)
+
     print(SAVE_DIR)
     print(LOG_DIR)
     print(MODEL_DIR)
     print(HIST_DIR)
-    print(SUB_DIR)
 
     train_model()
-    inference()
+
+    if CONFIG.USE_TTA:
+        tta_inference()
+    else:
+        inference()
+        

@@ -34,11 +34,12 @@ print("No. GPUs : "+str(len(devices)), "Tensorflow == "+tf.__version__, "Keras =
 
 
 TASK = "sorghum-id"
-TASK_ID = "2022-04-30-124425"
+TASK_ID = "2022-05-07-101114"
 
-MODEL = "EfficientNetV2L"
+MODEL = "EfficientNetV2XL"
 WEIGHTS = "imagenet"  # WEIGHTS = None
-OPTIMISER = "Radam"
+OPTIMISER = "adamW"
+KFOLDS = "6fold"
 
 IM_HEIGHT = 512
 IM_WIDTH = 512
@@ -72,14 +73,68 @@ MODEL_DIR   = "../models/"+TASK+"-"+TASK_ID+'-'+MODEL+'-'+str(WEIGHTS)+'/'
 HIST_DIR    = "../history/"+TASK+"-"+TASK_ID+'-'+MODEL+'-'+str(WEIGHTS)+'/'
 SUB_DIR     = "../submissions/"+TASK+"-"+TASK_ID+'-'+MODEL+'-'+str(WEIGHTS)+'/'
 
+def clahe(img):
+    c = cv.createCLAHE(clipLimit=40, tileGridSize=(16,16))  # create a clahe object
+    t = np.asarray(img)                                     # convert to np array
+    t = cv.cvtColor(t, cv.COLOR_BGR2HSV)                    # convert to OpenCV HSV
+    t[:,:,-1] = c.apply(t[:,:,-1])                          # Apply CLAHE to the Value (greyscale) of the image
+    t = cv.cvtColor(t, cv.COLOR_HSV2BGR)                    # Return to BGR OpenCV doamin
+    t = Img.fromarray(t)                                    # Convert to PIL Image
+    t = np.array(t)                                         # back to np array
+    return t
+
+def normalise(img):
+    t = np.array(img,dtype=np.float32)/255
+    return t
+
+class CLAHE(ImageOnlyTransform):
+    def apply(self, img, **params):
+        return clahe(img)
+
+class NORMALISE(ImageOnlyTransform):
+    def apply(self, img, **params):
+        return normalise(img)
 
 TTA = [
-        Compose([A.CLAHE(clip_limit=20, tile_grid_size=(16,16),p=1),
-                A.Resize(height=IM_HEIGHT, width=IM_WIDTH),]),
-
-        Compose([A.CLAHE(clip_limit=20, tile_grid_size=(16,16),p=1),
+        Compose([CLAHE(p=1),
                 A.Resize(height=IM_HEIGHT, width=IM_WIDTH),
-                A.HorizontalFlip(p=1),]),
+                A.Affine(rotate=0,p=1),]),
+
+        Compose([CLAHE(p=1),
+                A.Resize(height=IM_HEIGHT, width=IM_WIDTH),
+                A.Affine(rotate=90,p=1),]),
+
+        Compose([CLAHE(p=1),
+                A.Resize(height=IM_HEIGHT, width=IM_WIDTH),
+                A.Affine(rotate=180,p=2),]),
+        
+        Compose([CLAHE(p=1),
+                A.Resize(height=IM_HEIGHT, width=IM_WIDTH),
+                A.Affine(rotate=270,p=3),]),
+
+        Compose([CLAHE(p=1),
+                A.Resize(height=IM_HEIGHT, width=IM_WIDTH),
+                A.HorizontalFlip(p=1),
+                A.Affine(rotate=0,p=1),]),
+
+        Compose([CLAHE(p=1),
+                A.Resize(height=IM_HEIGHT, width=IM_WIDTH),
+                A.HorizontalFlip(p=1),
+                A.Affine(rotate=90,p=1),]),
+
+        Compose([CLAHE(p=1),
+                A.Resize(height=IM_HEIGHT, width=IM_WIDTH),
+                A.HorizontalFlip(p=1),
+                A.Affine(rotate=180,p=2),]),
+        
+        Compose([CLAHE(p=1),
+                A.Resize(height=IM_HEIGHT, width=IM_WIDTH),
+                A.HorizontalFlip(p=1),
+                A.Affine(rotate=270,p=3),]),
+
+        Compose([CLAHE(p=1),
+                A.Resize(height=IM_HEIGHT, width=IM_WIDTH),
+                A.ShiftScaleRotate(p=1),]),
 ]
 
 
